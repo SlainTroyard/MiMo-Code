@@ -399,12 +399,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           const requests = store.permission[event.properties.sessionID]
           if (!requests) break
           const match = Binary.search(requests, event.properties.requestID, (r) => r.id)
-          if (!match.found) break
+          // Fallback linear scan: a missed Binary.search must not leave the
+          // confirm dialog stuck after a successful reply (issue #2565).
+          const index = match.found ? match.index : requests.findIndex((r) => r.id === event.properties.requestID)
+          if (index < 0) break
           setStore(
             "permission",
             event.properties.sessionID,
             produce((draft) => {
-              draft.splice(match.index, 1)
+              draft.splice(index, 1)
             }),
           )
           break

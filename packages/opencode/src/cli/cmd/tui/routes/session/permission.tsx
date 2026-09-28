@@ -15,6 +15,7 @@ import { Keybind } from "@/util"
 import { Locale } from "@/util"
 import { Global } from "@/global"
 import { useDialog } from "../../ui/dialog"
+import { useToastOptional } from "../../ui/toast"
 import { getScrollAcceleration } from "../../util/scroll"
 import { useTuiConfig } from "../../context/tui-config"
 
@@ -220,15 +221,36 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
 function PermissionRequestPrompt(props: { request: PermissionRequest }) {
   const sdk = useSDK()
   const sync = useSync()
+  const toast = useToastOptional()
   const [store, setStore] = createStore({
     stage: "permission" as PermissionStage,
     // One-shot latch across stages (always / reject / main prompt).
     replied: false,
+    // Optimistic UI: flip to "sent" as soon as the reply POST is accepted so the
+    // dialog is not left looking dead after the first Enter (issue #2565).
+    status: "idle" as "idle" | "sending" | "sent",
   })
   const markReplied = () => {
     if (store.replied) return false
     setStore("replied", true)
     return true
+  }
+  const sendReply = (reply: "once" | "always" | "reject", message?: string) => {
+    setStore("status", "sending")
+    return sdk.client.permission
+      .reply({ reply, requestID: props.request.id, message })
+      .then(() => {
+        setStore("status", "sent")
+      })
+      .catch((err) => {
+        setStore("replied", false)
+        setStore("status", "idle")
+        setStore("stage", "permission")
+        toast?.show({
+          variant: "error",
+          message: `Permission reply failed: ${err instanceof Error ? err.message : String(err)}`,
+        })
+      })
   }
 
   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
@@ -248,7 +270,23 @@ function PermissionRequestPrompt(props: { request: PermissionRequest }) {
   const { theme } = useTheme()
   const config = useTuiConfig()
 
+  // Keep the dialog mounted but inert after submit so the first Enter has
+  // immediate visual feedback; permission.replied will unmount it for real.
+  // Solid components run once — use Show, not an early return, so status updates re-render.
   return (
+    <Show
+      when={store.status === "idle"}
+      fallback={
+        <box paddingLeft={1} paddingRight={1} gap={1}>
+          <box flexDirection="row" gap={1} flexShrink={0}>
+            <text fg={theme.textMuted}>{store.status === "sending" ? "…" : "✓"}</text>
+            <text fg={theme.text}>
+              {store.status === "sending" ? "Sending permission answer…" : "Permission answered"}
+            </text>
+          </box>
+        </box>
+      }
+    >
     <Switch>
       <Match when={store.stage === "always"}>
         <Prompt
@@ -281,10 +319,7 @@ function PermissionRequestPrompt(props: { request: PermissionRequest }) {
             setStore("stage", "permission")
             if (option === "cancel") return
             if (!markReplied()) return
-            void sdk.client.permission.reply({
-              reply: "always",
-              requestID: props.request.id,
-            })
+            void sendReply("always")
           }}
         />
       </Match>
@@ -292,11 +327,7 @@ function PermissionRequestPrompt(props: { request: PermissionRequest }) {
         <RejectPrompt
           onConfirm={(message) => {
             if (!markReplied()) return
-            void sdk.client.permission.reply({
-              reply: "reject",
-              requestID: props.request.id,
-              message: message || undefined,
-            })
+            void sendReply("reject", message || undefined)
           }}
           onCancel={() => {
             setStore("stage", "permission")
@@ -578,17 +609,11 @@ function PermissionRequestPrompt(props: { request: PermissionRequest }) {
                     return
                   }
                   if (!markReplied()) return
-                  void sdk.client.permission.reply({
-                    reply: "reject",
-                    requestID: props.request.id,
-                  })
+                  void sendReply("reject")
                   return
                 }
                 if (!markReplied()) return
-                void sdk.client.permission.reply({
-                  reply: "once",
-                  requestID: props.request.id,
-                })
+                void sendReply("once")
               }}
             />
           )
@@ -597,6 +622,7 @@ function PermissionRequestPrompt(props: { request: PermissionRequest }) {
         })()}
       </Match>
     </Switch>
+    </Show>
   )
 }
 
