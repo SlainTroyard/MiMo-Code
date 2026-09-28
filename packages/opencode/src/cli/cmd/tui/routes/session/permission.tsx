@@ -222,7 +222,14 @@ function PermissionRequestPrompt(props: { request: PermissionRequest }) {
   const sync = useSync()
   const [store, setStore] = createStore({
     stage: "permission" as PermissionStage,
+    // One-shot latch across stages (always / reject / main prompt).
+    replied: false,
   })
+  const markReplied = () => {
+    if (store.replied) return false
+    setStore("replied", true)
+    return true
+  }
 
   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
 
@@ -273,6 +280,7 @@ function PermissionRequestPrompt(props: { request: PermissionRequest }) {
           onSelect={(option) => {
             setStore("stage", "permission")
             if (option === "cancel") return
+            if (!markReplied()) return
             void sdk.client.permission.reply({
               reply: "always",
               requestID: props.request.id,
@@ -283,6 +291,7 @@ function PermissionRequestPrompt(props: { request: PermissionRequest }) {
       <Match when={store.stage === "reject"}>
         <RejectPrompt
           onConfirm={(message) => {
+            if (!markReplied()) return
             void sdk.client.permission.reply({
               reply: "reject",
               requestID: props.request.id,
@@ -568,12 +577,14 @@ function PermissionRequestPrompt(props: { request: PermissionRequest }) {
                     setStore("stage", "reject")
                     return
                   }
+                  if (!markReplied()) return
                   void sdk.client.permission.reply({
                     reply: "reject",
                     requestID: props.request.id,
                   })
                   return
                 }
+                if (!markReplied()) return
                 void sdk.client.permission.reply({
                   reply: "once",
                   requestID: props.request.id,
@@ -680,7 +691,17 @@ function Prompt<const T extends Record<string, string>>(props: {
   const [store, setStore] = createStore({
     selected: keys[0],
     expanded: false,
+    // One-shot latch: a permission reply must be sent at most once per prompt.
+    // Enter/Escape/mouse can race or auto-repeat; without this each extra event
+    // POSTs /permission/{id}/reply again (observed 11-32x on one requestID) and
+    // floods the TUI event path until setRawMode fails with EIO and the keyboard dies.
+    settled: false,
   })
+  const settle = (option: keyof T) => {
+    if (store.settled) return
+    setStore("settled", true)
+    props.onSelect(option)
+  }
   const diffKey = Keybind.parse("ctrl+f")[0]
   const narrow = createMemo(() => dimensions().width < 80)
   const dialog = useDialog()
@@ -704,12 +725,12 @@ function Prompt<const T extends Record<string, string>>(props: {
 
     if (evt.name === "return") {
       evt.preventDefault()
-      props.onSelect(store.selected)
+      settle(store.selected)
     }
 
     if (props.escapeKey && (evt.name === "escape" || keybind.match("app_exit", evt))) {
       evt.preventDefault()
-      props.onSelect(props.escapeKey)
+      settle(props.escapeKey)
     }
 
     if (props.fullscreen && diffKey && Keybind.match(diffKey, keybind.parse(evt))) {
@@ -777,7 +798,7 @@ function Prompt<const T extends Record<string, string>>(props: {
                 onMouseOver={() => setStore("selected", option)}
                 onMouseUp={() => {
                   setStore("selected", option)
-                  props.onSelect(option)
+                  settle(option)
                 }}
               >
                 <text fg={option === store.selected ? selectedForeground(theme, theme.warning) : theme.textMuted}>
